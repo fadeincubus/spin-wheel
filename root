@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>三秒转盘（本地保存 & 导入导出）</title>
+    <!-- Tailwind CDN（零构建） -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React 18 UMD + ReactDOM UMD -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+    <!-- Babel：让浏览器直接跑 JSX（仅用于演示/小项目） -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  </head>
+  <body class="bg-slate-50">
+    <div id="root"></div>
+
+    <script type="text/babel">
+      const { useEffect, useMemo, useRef, useState } = React;
+
+      const LS_KEY = "wheel-items-v1";
+      const DEFAULT_ITEMS = [
+        { id: crypto.randomUUID(), name: "🍎 Apple", imageDataUrl: "", color: "#fde047" },
+        { id: crypto.randomUUID(), name: "🍇 Grape", imageDataUrl: "", color: "#60a5fa" },
+        { id: crypto.randomUUID(), name: "🍑 Peach", imageDataUrl: "", color: "#fca5a5" },
+        { id: crypto.randomUUID(), name: "🍉 Watermelon", imageDataUrl: "", color: "#86efac" },
+      ];
+
+      function downloadTextFile(filename, text) {
+        const blob = new Blob([text], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = filename; a.click();
+        URL.revokeObjectURL(url);
+      }
+      function fileToDataUrl(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+      }
+      const d2r = (deg) => (deg * Math.PI) / 180;
+      function slicePath(cx, cy, r, startDeg, endDeg) {
+        const start = { x: cx + r * Math.cos(d2r(startDeg)), y: cy + r * Math.sin(d2r(startDeg)) };
+        const end   = { x: cx + r * Math.cos(d2r(endDeg)),   y: cy + r * Math.sin(d2r(endDeg)) };
+        const largeArc = endDeg - startDeg > 180 ? 1 : 0;
+        return `M ${cx} ${cy} L ${start.x} ${start.y} A ${r} ${r} 0 ${largeArc} 1 ${end.x} ${end.y} Z`;
+      }
+      function getContrastingTextColor(hexColor) {
+        try {
+          const c = hexColor.replace('#','');
+          const r = parseInt(c.substring(0,2),16);
+          const g = parseInt(c.substring(2,4),16);
+          const b = parseInt(c.substring(4,6),16);
+          const yiq = (r*299 + g*587 + b*114) / 1000;
+          return yiq >= 140 ? "#111827" : "#F9FAFB";
+        } catch { return "#111827"; }
+      }
+
+      function WheelApp() {
+        const [items, setItems] = useState(() => {
+          try {
+            const fromLS = localStorage.getItem(LS_KEY);
+            if (fromLS) {
+              const parsed = JSON.parse(fromLS);
+              if (Array.isArray(parsed) && parsed.length) return parsed;
+            }
+          } catch {}
+          return DEFAULT_ITEMS;
+        });
+
+        useEffect(() => {
+          try { localStorage.setItem(LS_KEY, JSON.stringify(items)); } catch {}
+        }, [items]);
+
+        const [isSpinning, setIsSpinning] = useState(false);
+        const [rotation, setRotation] = useState(0);
+        const [winner, setWinner] = useState(null);
+        const [showModal, setShowModal] = useState(false);
+        const wheelRef = useRef(null);
+
+        const durationMs = 3000; // 固定三秒
+        const sliceAngle = useMemo(() => (items.length ? 360 / items.length : 0), [items.length]);
+        const palette = ["#60a5fa","#f59e0b","#10b981","#f43f5e","#a78bfa","#14b8a6","#f97316","#22c55e","#eab308","#06b6d4"];
+
+        useEffect(() => {
+          setItems(prev => prev.map((it, i) => ({ ...it, color: it.color || palette[i % palette.length] })));
+          // eslint-disable-next-line
+        }, []);
+
+        function spin() {
+          if (!items.length || isSpinning) return;
+          setWinner(null);
+          setShowModal(false);
+          const idx = Math.floor(Math.random() * items.length);
+          const sliceStart = idx * sliceAngle;
+          const sliceCenter = sliceStart + sliceAngle / 2;
+          const base = -90 - sliceCenter - rotation;
+          const extraTurns = 6; // 想更华丽改成 8~10
+          const delta = base + extraTurns * 360;
+          const nextRotation = rotation + delta;
+
+          setIsSpinning(true);
+          setRotation(nextRotation);
+
+          const onEnd = () => {
+            setIsSpinning(false);
+            setWinner(items[idx]);
+            setShowModal(true);
+            wheelRef.current?.removeEventListener("transitionend", onEnd);
+          };
+          wheelRef.current?.addEventListener("transitionend", onEnd);
+        }
+
+        function addEmptyItem() {
+          setItems(prev => [
+            ...prev,
+            { id: crypto.randomUUID(), name: `Item ${prev.length + 1}`, imageDataUrl: "", color: palette[prev.length % palette.length] },
+          ]);
+        }
+        function removeItem(id) { setItems(prev => prev.filter(it => it.id !== id)); }
+        async function handleImageChange(id, file) {
+          if (!file) return;
+          const dataUrl = await fileToDataUrl(file);
+          setItems(prev => prev.map(it => it.id === id ? { ...it, imageDataUrl: dataUrl } : it));
+        }
+        function handleNameChange(id, name) {
+          setItems(prev => prev.map(it => it.id === id ? { ...it, name } : it));
+        }
+        function exportConfig() {
+          const payload = { version: 1, savedAt: new Date().toISOString(), items };
+          downloadTextFile("wheel-config.json", JSON.stringify(payload, null, 2));
+        }
+        async function importConfig(file) {
+          if (!file) return;
+          try {
+            const text = await file.text();
+            const obj = JSON.parse(text);
+            if (!obj || !Array.isArray(obj.items)) throw new Error("Invalid config");
+            const sanitized = obj.items.map((x, i) => ({
+              id: x.id || crypto.randomUUID(),
+              name: String(x.name ?? `Item ${i + 1}`),
+              imageDataUrl: typeof x.imageDataUrl === "string" ? x.imageDataUrl : "",
+              color: x.color || palette[i % palette.length],
+            }));
+            setItems(sanitized);
+          } catch (e) {
+            alert("导入失败：配置文件格式不正确。");
+            console.error(e);
+          }
+        }
+        function clearAll() {
+          if (confirm("清空所有目标并重置示例？")) {
+            setItems(DEFAULT_ITEMS); setRotation(0); setWinner(null); setShowModal(false);
+          }
+        }
+
+        const size = 380, r = size/2 - 6, cx = size/2, cy = size/2;
+
+        return (
+          <div className="min-h-screen w-full text-slate-900">
+            <div className="max-w-6xl mx-auto px-4 py-6">
+              <h1 className="text-2xl md:text-3xl font-semibold mb-4">三秒转盘（可添加图片/本地保存/导入导出）</h1>
+              <p className="text-sm text-slate-600 mb-6">左侧为转盘（固定旋转总时长 3 秒）。右侧可添加/删除目标、为目标上传图片。每次修改会自动保存到本地（localStorage）。点击“导出配置/导入配置”可备份或恢复。</p>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+                {/* Left: Wheel */}
+                <div className="bg-white rounded-2xl shadow p-4 flex flex-col items-center">
+                  <div className="relative">
+                    {/* Pointer */}
+                    <div className="absolute left-1/2 -translate-x-1/2 -top-4 z-20">
+                      <div className="w-0 h-0 border-l-8 border-r-8 border-b-[18px] border-l-transparent border-r-transparent border-b-rose-500 drop-shadow" />
+                    </div>
+
+                    {/* Wheel */}
+                    <div
+                      ref={wheelRef}
+                      style={{
+                        width: size, height: size,
+                        transition: isSpinning ? `transform ${durationMs}ms cubic-bezier(0.16, 1, 0.3, 1)` : undefined,
+                        transform: `rotate(${rotation}deg)`,
+                      }}
+                      className="rounded-full select-none"
+                    >
+                      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+                        <circle cx={cx} cy={cy} r={r + 3} fill="#e5e7eb" />
+                        {items.length === 0 && (
+                          <text x={cx} y={cy} textAnchor="middle" dominantBaseline="middle" className="fill-slate-500">添加一些目标吧 →</text>
+                        )}
+                        {items.map((it, i) => {
+                          const sliceAngle = 360 / items.length;
+                          const start = i * sliceAngle - 90;
+                          const end = (i + 1) * sliceAngle - 90;
+                          const mid = start + sliceAngle / 2;
+                          const path = slicePath(cx, cy, r, start, end);
+                          const tx = cx + (r * 0.62) * Math.cos(d2r(mid));
+                          const ty = cy + (r * 0.62) * Math.sin(d2r(mid));
+                          const tFill = getContrastingTextColor(it.color || "#ffffff");
+                          return (
+                            <g key={it.id}>
+                              <path d={path} fill={it.color || "#60a5fa"} stroke="#ffffff" strokeWidth={1.2} />
+                              <g transform={`rotate(${mid + 90}, ${tx}, ${ty})`}>
+                                <text x={tx} y={ty} textAnchor="middle" dominantBaseline="middle" fontSize={12} className="select-none" fill={tFill}>
+                                  {it.name || `Item ${i + 1}`}
+                                </text>
+                              </g>
+                            </g>
+                          );
+                        })}
+                        <circle cx={cx} cy={cy} r={24} fill="#111827" />
+                        <circle cx={cx} cy={cy} r={8} fill="#f8fafc" />
+                      </svg>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex gap-3">
+                    <button onClick={spin} disabled={!items.length || isSpinning} className="px-4 py-2 rounded-xl bg-rose-500 text-white shadow disabled:opacity-50">
+                      {isSpinning ? "旋转中..." : "开始旋转"}
+                    </button>
+                    <button onClick={clearAll} className="px-3 py-2 rounded-xl bg-slate-200 text-slate-800">重置示例</button>
+                  </div>
+
+                  <p className="text-xs text-slate-500 mt-2">提示：总时长固定 3 秒；通过增加整圈数提升观感速度。</p>
+                </div>
+
+                {/* Right: Editor */}
+                <div className="bg-white rounded-2xl shadow p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <h2 className="text-lg font-semibold">目标列表</h2>
+                    <div className="flex gap-2">
+                      <button onClick={addEmptyItem} className="px-3 py-2 rounded-xl bg-emerald-500 text-white shadow">添加目标</button>
+                      <button onClick={exportConfig} className="px-3 py-2 rounded-xl bg-sky-500 text-white shadow">导出配置</button>
+                      <label className="px-3 py-2 rounded-xl bg-amber-500 text-white shadow cursor-pointer">
+                        导入配置
+                        <input type="file" accept="application/json" className="hidden" onChange={(e) => importConfig(e.target.files?.[0])} />
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="space-y-3 max-h-[540px] overflow-auto pr-1">
+                    {items.map((it, idx) => (
+                      <div key={it.id} className="p-3 rounded-xl border flex items-start gap-3">
+                        <div className="w-16 h-16 rounded-lg bg-slate-100 overflow-hidden flex items-center justify-center">
+                          {it.imageDataUrl ? (
+                            <img src={it.imageDataUrl} alt="thumb" className="w-full h-full object-cover" />
+                          ) : (<span className="text-xs text-slate-400">无图片</span>)}
+                        </div>
+
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <input
+                              value={it.name}
+                              onChange={(e) => handleNameChange(it.id, e.target.value)}
+                              className="w-full px-3 py-2 rounded-lg border"
+                              placeholder={`目标 ${idx + 1} 名称`}
+                            />
+                            <input
+                              type="color" title="扇区颜色" value={it.color}
+                              onChange={(e) => setItems(prev => prev.map(x => x.id === it.id ? { ...x, color: e.target.value } : x))}
+                              className="w-10 h-10 p-1 rounded-lg border"
+                            />
+                          </div>
+
+                          <div className="mt-2 flex items-center gap-2 text-sm">
+                            <label className="px-2 py-1 rounded-md bg-slate-100 border cursor-pointer">
+                              上传图片
+                              <input type="file" accept="image/*" className="hidden" onChange={(e) => handleImageChange(it.id, e.target.files?.[0])} />
+                            </label>
+                            {it.imageDataUrl && (
+                              <button
+                                onClick={() => setItems(prev => prev.map(x => x.id === it.id ? { ...x, imageDataUrl: "" } : x))}
+                                className="px-2 py-1 rounded-md bg-slate-100 border"
+                              >移除图片</button>
+                            )}
+                          </div>
+                        </div>
+
+                        <button onClick={() => removeItem(it.id)} className="px-2 py-1 rounded-lg bg-slate-200 text-slate-700 hover:bg-slate-300">删除</button>
+                      </div>
+                    ))}
+                    {items.length === 0 && <div className="text-sm text-slate-500">暂无目标。点击上方“添加目标”。</div>}
+                  </div>
+                </div>
+              </div>
+
+              {showModal && winner && (
+                <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowModal(false)}>
+                  <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full overflow-hidden" onClick={(e) => e.stopPropagation()}>
+                    <div className="p-4 border-b"><h3 className="text-lg font-semibold">结果</h3></div>
+                    <div className="p-4 flex items-center gap-3">
+                      <div className="w-20 h-20 rounded-lg bg-slate-100 overflow-hidden flex items-center justify-center">
+                        {winner.imageDataUrl ? <img src={winner.imageDataUrl} alt="选中图片" className="w-full h-full object-cover" /> : <span className="text-xs text-slate-400">无图片</span>}
+                      </div>
+                      <div className="flex-1">
+                        <div className="text-sm text-slate-500">指针所指目标：</div>
+                        <div className="text-xl font-semibold">{winner.name}</div>
+                      </div>
+                    </div>
+                    <div className="p-4 border-t flex justify-end">
+                      <button onClick={() => setShowModal(false)} className="px-4 py-2 rounded-xl bg-rose-500 text-white">确定</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-8 bg-white rounded-2xl shadow p-4">
+                <h2 className="text-lg font-semibold mb-2">使用说明</h2>
+                <ol className="list-decimal pl-5 space-y-1 text-sm">
+                  <li>右侧“添加目标”，填名称、上传图片（可选）、选颜色；更改自动本地保存。</li>
+                  <li>点击“导出配置”下载 <code>wheel-config.json</code>；“导入配置”可恢复。</li>
+                  <li>点“开始旋转”，转盘在 <b>3 秒</b> 内停止，随后弹窗显示中选目标。</li>
+                </ol>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      const root = ReactDOM.createRoot(document.getElementById("root"));
+      root.render(<WheelApp />);
+    </script>
+  </body>
+</html>
